@@ -16,3 +16,9 @@ library
   exposed-modules:     Debug.Hoed.Observe
   build-depends:       base >=4.6 && <5, template-haskell >=2.7.0 && <2.10, array
   default-language:    Haskell2010
+
+Executable hoed-examples-SternBrocot
+  build-depends:       base >= 4.6 && < 5, Hoed
+  main-is:             SternBrocot.lhs
+  hs-source-dirs:      examples
+  default-language:    Haskell2010
