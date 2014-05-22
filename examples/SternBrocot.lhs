@@ -59,13 +59,23 @@ each next rational number is a better aproximation of the Float.
 >       GT -> toFrac val left
 >       EQ -> frac
 
-Generate observer instances using template haskell.
+We use template-haskell to observe Tree and the values stored in Tree.
 
-> $(observedTypes "sternbrocot" [ [t| forall a . Observable a => Tree a |]
->                               , [t| Frac |]
->                               ]
+> $(observedTypes "sternbrocot1" [ [t| forall a . Observable a => Tree a |]
+>                                , [t| Frac |]
+>                                ]
 >  )
+>
+> frac1 = toFrac 0.6 ($(observe "sternbrocot1") sternbrocot)
+
+Or to only observe which part of the tree is walked while ignoring
+the values stored in the tree.
+
+> $(observedTypes "sternbrocot2" [ [t| forall a . Tree a |]])
+>
+> frac2 = toFrac 0.6 ($(observe "sternbrocot2") sternbrocot)
 
 Example main function:
 
-> main = runO . print $ toFrac 0.6 ($(observe "sternbrocot") sternbrocot)
+> main = runO $ do print frac1
+>                  print frac2
