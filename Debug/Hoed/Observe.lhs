@@ -331,12 +331,14 @@ observedTypes :: String -> [Q Type] -> Q [Dec]
 observedTypes s qt = do cd <- (genClassDef s)
                         ci <- foldM f [] qt
                         bi <- foldM g [] baseTypes
-                        return (cd ++ ci ++ bi)
+                        fi <- (gfunObserver s)
+                        li <- (gListObserver s)
+                        return (cd ++ ci ++ bi ++ fi ++ li)
         where f d t = do ds <- (gobservableInstance s t)
                          return (ds ++ d)
               g d t = do ds <- (gobservableBaseInstance s t)
                          return (ds ++ d)
-              baseTypes = [[t|Int|], [t|Char|]]
+              baseTypes = [[t|Int|], [t|Char|], [t|Float|], [t|Bool|]]
 
 
 
@@ -377,6 +379,11 @@ gobserverBase qn t = do n <- qn
 gobserverBaseClause :: Q Name -> Q Clause
 gobserverBaseClause qn = clause [] (normalB (varE $ mkName "observeBase")) []
 
+gobserverList :: Q Name -> Q [Dec]
+gobserverList qn = do n  <- qn
+                      cs <-listClauses qn
+                      return [FunD n cs]
+
 
 \end{code}
 
@@ -390,21 +397,64 @@ gobserver qn t = do n <- qn
                     return [FunD n cs]
 
 gobserverClauses :: Q Name -> Q Type -> Q [Clause]
-gobserverClauses n t = do cs <- (getConstructors . getName) t
-                          bs <- getBindings t
-                          mapM (gobserverClause n bs) cs
+gobserverClauses n qt = do t  <- qt
+                           bs <- getBindings qt
+                           case t of
+                                _     -> do cs <- (getConstructors . getName) qt
+                                            mapM (gobserverClause t n bs) cs
 
-gobserverClause :: Q Name -> TyVarMap -> Con -> Q Clause
-gobserverClause n bs (y@(NormalC name fields))
+gobserverClause :: Type -> Q Name -> TyVarMap -> Con -> Q Clause
+gobserverClause t n bs (y@(NormalC name fields))
   = do { vars <- guniqueVariables (length fields)
        ; let evars = map varE vars
              pvars = map varP vars
              c'    = varP (mkName "c")
              c     = varE (mkName "c")
        ; clause [conP name pvars, c']
-           ( normalB [| send $(shallowShow y) $(observeChildren n bs y evars) $c |]
+           ( normalB [| send $(shallowShow y) $(observeChildren n t bs y evars) $c |]
            ) []
        }
+gobserverClause t n bs y = error ("gobserverClause can't handle " ++ show y)
+
+listClauses :: Q Name -> Q [Clause]
+listClauses n = do l1 <- listClause1 n 
+                   l2 <- listClause2 n 
+                   return [l1, l2]
+
+-- observer (a:as) = send ":"  (return (:) << a << as)
+listClause1 :: Q Name -> Q Clause
+listClause1 qn
+  = do { n <- qn
+       ; let a'    = varP (mkName "a")
+             a     = varE (mkName "a")
+             as'   = varP (mkName "as")
+             as    = varE (mkName "as") 
+             c'    = varP (mkName "c")
+             c     = varE (mkName "c")
+             t     = [| thunk $(varE n)|] -- MF TODO: or nothunk
+             name  = mkName ":"
+       ; clause [infixP a' name as', c']
+           ( normalB [| send ":" ( compositionM $t
+                                   ( compositionM $t
+                                     ( return (:)
+                                     ) $a
+                                   ) $as
+                                 ) $c
+                     |]
+           ) []
+       }
+
+-- observer []     = send "[]" (return [])
+listClause2 :: Q Name -> Q Clause
+listClause2 qn
+  = do { n <- qn
+       ; let c'    = varP (mkName "c")
+             c     = varE (mkName "c")
+       ; clause [wildP, c']
+           ( normalB [| send "[]" (return []) $c |]
+           ) []
+       }
+
 \end{code}
 
 We also need to do some work to also generate the instance declaration
@@ -445,6 +495,72 @@ gobservableBaseInstance s qt
                 (ForallT _ c' _)   -> return c'
                 _                  -> return []
        return [InstanceD c n m]
+
+gobservableListInstance :: String -> Q [Dec]
+gobservableListInstance s
+  = do let qt = [t|forall a . [] a |]
+       t  <- qt
+       cn <- className s
+       let ct = conT cn
+       n  <- case t of
+            (ForallT tvs _ t') -> [t| $ct $(return t') |]
+            _                  -> [t| $ct $qt          |]
+       m  <- gobserverList (methodName s)
+       c  <- case t of 
+                (ForallT _ c' _)   -> return c'
+                _                  -> return []
+       return [InstanceD c n m]
+
+gListObserver :: String -> Q [Dec]
+gListObserver s
+  = do cn <- className s
+       let ct = conT cn
+           a  = VarT (mkName "a")
+           a' = return a
+       p <- classP cn [a']
+       c <- return [p]
+       n <- [t| $ct [$a'] |]
+       m <- gobserverList (methodName s)
+       return [InstanceD c n m]
+
+
+gobserverFunClause :: Name -> Q Clause
+gobserverFunClause n
+  = do { [f',a'] <- guniqueVariables 2
+       ; let vs        = [f', mkName "c", a']
+             [f, c, a] = map varE vs
+             pvars     = map varP vs
+       ; clause pvars 
+         (normalB [| sendObserveFnPacket ( do a' <- thunk $(varE n) $a
+                                              thunk $(varE n) ($f a')
+                                         ) $c
+                  |]
+         ) []
+       }
+
+gobserverFun :: Q Name -> Q [Dec]
+gobserverFun qn
+  = do n  <- qn
+       c  <- gobserverFunClause n
+       cs <- return [c]
+       return [FunD n cs]
+
+gfunObserver :: String -> Q [Dec]
+gfunObserver s
+  = do cn <- className s
+       let ct = conT cn
+           a  = VarT (mkName "a")
+           b  = VarT (mkName "b")
+           f  = return $ AppT (AppT ArrowT a) b
+           a' = return a
+           b' = return b
+       pa <- classP cn [a']
+       pb <- classP cn [b']
+       c <- return [pa,pb]
+       n <- [t| $ct $f |]
+       m <- gobserverFun (methodName s)
+       return [InstanceD c n m]
+
 \end{code}
 
 Creating a shallow representation for types of the Data class.
@@ -465,14 +581,15 @@ with Template Haskell.
 
 \begin{code}
 
-isObservable :: TyVarMap -> Type -> Q Bool
-isObservable bs (VarT n)      = case lookupBinding bs n of
-                                     (Just (T t)) -> isObservableT t
-                                     (Just (P p)) -> isObservableP p
-                                     Nothing      -> return False
-isObservable bs (AppT t _)    = isObservable bs t
-isObservable (n,_) t@(ConT m) = if n == m then return True else isObservableT t
-isObservable bs t             = isObservableT t
+isObservable :: TyVarMap -> Type -> Type -> Q Bool
+isObservable bs s t = if s == t then return True else isObservable' bs t
+isObservable' bs (VarT n)      = case lookupBinding bs n of
+                                      (Just (T t)) -> isObservableT t
+                                      (Just (P p)) -> isObservableP p
+                                      Nothing      -> return False
+isObservable' bs (AppT t _)    = isObservable' bs t
+isObservable' (n,_) t@(ConT m) = if n == m then return True else isObservableT t
+isObservable' bs t             = isObservableT t
 
 isObservableT :: Type -> Q Bool
 isObservableT t@(ConT _)                 = isInstance (mkName "Observable") [t]
@@ -483,14 +600,14 @@ isObservableP (ClassP n _) = return $ (nameBase n) == "Observable"
 isObservableP _            = return False
 
 
-thunkObservable :: Q Name -> TyVarMap -> Type -> Q Exp
-thunkObservable qn bs t
-  = do i <- isObservable bs t
+thunkObservable :: Q Name -> TyVarMap -> Type -> Type -> Q Exp
+thunkObservable qn bs s t
+  = do i <- isObservable bs s t
        n <- qn
        if i then [| thunk $(varE n) |] else [| nothunk |]
 
-observeChildren :: Q Name -> TyVarMap -> Con -> [Q Exp] -> Q Exp
-observeChildren n bs = gmapM (thunkObservable n bs)
+observeChildren :: Q Name -> Type -> TyVarMap -> Con -> [Q Exp] -> Q Exp
+observeChildren n t bs = gmapM (thunkObservable n bs t)
 
 gmapM :: (Type -> Q Exp) -> Con -> [ExpQ] -> ExpQ
 gmapM f (NormalC name fields) vars
