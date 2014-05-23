@@ -1,6 +1,12 @@
 \begin{code}
 {-# LANGUAGE Rank2Types #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE DefaultSignatures #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE KindSignatures #-}
 
 \end{code}
 
@@ -40,10 +46,10 @@ module Debug.Hoed.Observe
   (
    -- * The main Hood API
   
-
-    gobserve	   -- (Observable a) => String -> a -> a
+     observe
+  , gdmobserve
   , Observer(..)   -- contains a 'forall' typed observe (if supported).
-  , Observing      -- a -> a
+  -- , Observing      -- a -> a
   , Observable(..) -- Class
   , runO	   -- IO a -> IO ()
   , printO	   -- a -> IO ()
@@ -58,12 +64,13 @@ module Debug.Hoed.Observe
   , observeOpaque
 
   , observedTypes
-  , observe
 
   -- * For users that want to write there own render drivers.
   
   , debugO	   -- IO a -> IO [CDS]
   , CDS(..)
+
+  , Generic
   ) where	
 \end{code}
 
@@ -84,6 +91,7 @@ import Data.Char
 --import System
 
 import Language.Haskell.TH
+import GHC.Generics
 
 -- The only non standard one we assume
 --import IOExts
@@ -197,6 +205,108 @@ handleExc context exc = return (send "throw" (return throw << exc) context)
 \end{code}
 
 
+%************************************************************************
+%*									*
+\subsection{GDM Generics}
+%*									*
+%************************************************************************
+
+he generic implementation of the observer function.
+
+\begin{code}
+class Observable a where
+	observer  :: a -> Parent -> a 
+        default observer :: (Generic a, GObservable (Rep a)) => a -> Parent -> a
+        observer x c = to (gdmobserver (from x) c)
+
+class GObservable f where
+        gdmobserver :: f a -> Parent -> f a
+        gdmObserveChildren :: f a -> ObserverM (f a)
+        gdmShallowShow :: f a -> String
+\end{code}
+
+Creating a shallow representation for types of the Data class.
+
+\begin{code}
+
+-- shallowShow :: Constructor c => t c (f :: * -> *) a -> [Char]
+-- shallowShow = conName
+
+\end{code}
+
+Observing the children of Data types of kind *.
+
+\begin{code}
+
+-- Meta: data types
+instance (GObservable a) => GObservable (M1 D d a) where
+        gdmobserver m@(M1 x) cxt = M1 (gdmobserver x cxt)
+        gdmObserveChildren = gthunk
+
+-- Meta: Constructors
+instance (GObservable a, Constructor c) => GObservable (M1 C c a) where
+        gdmobserver m@(M1 x) cxt = M1 (send (gdmShallowShow m) (gdmObserveChildren x) cxt)
+        gdmObserveChildren = gthunk
+        gdmShallowShow = conName
+
+-- Meta: Selectors
+--      | selName m == "" = M1 y
+--      | otherwise       = M1 (send (selName m) (return y) cxt)
+instance (GObservable a, Selector s) => GObservable (M1 S s a) where
+        gdmobserver m@(M1 x) cxt = M1 (gdmobserver x cxt)
+        gdmObserveChildren = gthunk
+
+-- Unit: used for constructors without arguments
+instance GObservable U1 where
+        gdmobserver x _ = x
+
+        gdmObserveChildren = return
+
+-- Products: encode multiple arguments to constructors
+instance (GObservable a, GObservable b) => GObservable (a :*: b) where
+        gdmobserver (a :*: b) cxt = error "gdmobserver product"
+
+        gdmObserveChildren (a :*: b) = do a'  <- gdmObserveChildren a
+                                          b'  <- gdmObserveChildren b
+                                          return (a' :*: b')
+                                       
+
+-- Sums: encode choice between constructors
+instance (GObservable a, GObservable b) => GObservable (a :+: b) where
+        gdmobserver (L1 x) cxt = L1 (gdmobserver x cxt)
+        gdmobserver (R1 x) cxt = R1 (gdmobserver x cxt)
+
+        gdmObserveChildren (R1 x) = do {x' <- gdmObserveChildren x; return (R1 x')}
+        gdmObserveChildren (L1 x) = do {x' <- gdmObserveChildren x; return (L1 x')}
+
+-- Constants: additional parameters and recursion of kind *
+instance (Observable a) => GObservable (K1 i a) where
+        gdmobserver (K1 x) cxt = K1 (observer_ observer x cxt)
+
+        gdmObserveChildren = gthunk
+\end{code}
+
+Observing functions is done via the ad-hoc mechanism, because
+we provide an instance definition the default is ignored for
+this type.
+
+\begin{code}
+instance (Observable a,Observable b) => Observable (a -> b) where
+  observer fn cxt arg = gdmFunObserver cxt fn arg
+\end{code}
+
+Observing the children of Data types of kind *->*.
+
+\begin{code}
+gdmFunObserver :: (Observable a,Observable b) => Parent -> (a->b) -> (a->b)
+gdmFunObserver cxt fn arg
+        = sendObserveFnPacket (do { arg' <- thunk observer arg
+                                  ; thunk observer (fn arg')
+                                  }
+                              ) cxt
+\end{code}
+
+
 %************************************************************************
 %*									*
 \subsection{Generics}
@@ -407,8 +517,8 @@ funObserver f c a = sendObserveFnPacket ( do a' <- thunk observer a
                                              thunk observer (f a')
                                         ) c
 
-instance (Observable a,Observable b) => Observable (a -> b) where
-  observer = funObserver
+-- instance (Observable a,Observable b) => Observable (a -> b) where
+--   observer = funObserver
 \end{code}
 
 And we need some helper functions:
@@ -618,7 +728,8 @@ instance Observable Dynamic where { observer = observeOpaque "<Dynamic>" }
 %*									*
 %************************************************************************
 
-\begin{code}
+MF TODO: remove
+
 class Observable a where
 	{-
 	 - This reveals the name of a specific constructor.
@@ -630,12 +741,49 @@ class Observable a where
 	observer  :: a -> Parent -> a 
 
 type Observing a = a -> a
-\end{code}
 
-MF: when do we need this type?
+MF TODO: end
 
 \begin{code}
 newtype Observer = O (forall a . (Observable a) => String -> a -> a)
+
+defaultObservers :: (Observable a) => String -> (Observer -> a) -> a
+defaultObservers label fn = unsafeWithUniq $ \ node ->
+     do { sendEvent node (Parent 0 0) (Observe label)
+	; let observe' sublabel a
+	       = unsafeWithUniq $ \ subnode ->
+		 do { sendEvent subnode (Parent node 0) 
+		                        (Observe sublabel)
+		    ; return (observer_ observer a (Parent
+			{ observeParent = subnode
+			, observePort   = 0
+		        }))
+		    }
+        ; return (observer_ observer (fn (O observe'))
+		       (Parent
+			{ observeParent = node
+			, observePort   = 0
+		        }))
+	}
+defaultFnObservers :: (Observable a, Observable b) 
+		      => String -> (Observer -> a -> b) -> a -> b
+defaultFnObservers label fn arg = unsafeWithUniq $ \ node ->
+     do { sendEvent node (Parent 0 0) (Observe label)
+	; let observe' sublabel a
+	       = unsafeWithUniq $ \ subnode ->
+		 do { sendEvent subnode (Parent node 0) 
+		                        (Observe sublabel)
+		    ; return (observer_ observer a (Parent
+			{ observeParent = subnode
+			, observePort   = 0
+		        }))
+		    }
+        ; return (observer_ observer (fn (O observe'))
+		       (Parent
+			{ observeParent = node
+			, observePort   = 0
+		        }) arg)
+	}
 \end{code}
 
 
@@ -666,6 +814,14 @@ thunk f a = ObserverM $ \ parent port ->
 				}) 
 		, port+1 )
 
+gthunk :: (GObservable f) => f a -> ObserverM (f a)
+gthunk a = ObserverM $ \ parent port ->
+		( gdmobserver_ a (Parent
+				{ observeParent = parent
+				, observePort   = port
+				}) 
+		, port+1 )
+
 nothunk :: a -> ObserverM a
 nothunk a = ObserverM $ \ parent port ->
 		( observer__ a (Parent
@@ -676,7 +832,16 @@ nothunk a = ObserverM $ \ parent port ->
 
 
 (<<) :: (Observable a) => ObserverM (a -> b) -> a -> ObserverM b
-fn << a = do { fn' <- fn ; a' <- thunk observer a ; return (fn' a') }
+-- fn << a = do { fn' <- fn ; a' <- thunk a ; return (fn' a') }
+fn << a = gdMapM (thunk observer) fn a
+
+gdMapM :: (Monad m)
+        => (a -> m a)  -- f
+        -> m (a -> b)  -- data constructor
+        -> a           -- argument
+        -> m b         -- data
+gdMapM f c a = do { c' <- c ; a' <- f a ; return (c' a') }
+
 \end{code}
 
 
@@ -705,6 +870,10 @@ Our principle function and class
 gobserve :: (a->Parent->a) -> String -> a -> a
 gobserve f name a = generateContext f name a 
 
+{-# NOINLINE gdmobserve #-}
+gdmobserve ::  (Observable a) => String -> a -> a
+gdmobserve = gobserve observer
+
 {- This gets called before observer, allowing us to mark
  - we are entering a, before we do case analysis on
  - our object.
@@ -714,6 +883,8 @@ gobserve f name a = generateContext f name a
 observer_ :: (a -> Parent -> a) -> a -> Parent -> a 
 observer_ f a context = sendEnterPacket f a context
 
+gdmobserver_ :: (GObservable f) => f a -> Parent -> f a
+gdmobserver_ a context = gsendEnterPacket a context
 
 {-# NOINLINE observer__ #-}
 observer__ :: a -> Parent -> a
@@ -727,6 +898,10 @@ data Parent = Parent
 	, observePort   :: !Int	-- my branch number
 	} deriving Show
 root = Parent 0 0
+
+
+add :: Parent -> Int -> Parent
+add (Parent parent port) i = Parent parent (port+1)
 \end{code}
 
 
@@ -751,6 +926,13 @@ generateContext f label orig = unsafeWithUniq $ \ node ->
 		  )
 	}
 
+send' :: String -> Int -> ObserverM a -> Parent -> (Int,a)
+send' consLabel fixity fn context = unsafeWithUniq $ \ node ->
+     do { let (r,portCount) = runMO fn node 0
+	; sendEvent node context (Cons fixity consLabel)
+	; return (node,r)
+	}
+
 send :: String -> ObserverM a -> Parent -> a
 send consLabel fn context = unsafeWithUniq $ \ node ->
      do { let (r,portCount) = runMO fn node 0
@@ -763,6 +945,13 @@ sendEnterPacket :: (a -> Parent -> a) -> a -> Parent -> a
 sendEnterPacket f r context = unsafeWithUniq $ \ node ->
      do	{ sendEvent node context Enter
 	; ourCatchAllIO (evaluate (f r context))
+	                (handleExc context)
+	}
+
+gsendEnterPacket :: (GObservable f) => f a -> Parent -> f a
+gsendEnterPacket r context = unsafeWithUniq $ \ node ->
+     do	{ sendEvent node context Enter
+	; ourCatchAllIO (evaluate (gdmobserver r context))
 	                (handleExc context)
 	}
 

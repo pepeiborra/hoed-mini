@@ -3,6 +3,12 @@ Observable instances. We need the Rank2Types extionsion to be able
 to specify parametrized types such as 'Tree a' with forall a.
 
 > {-# LANGUAGE TemplateHaskell, Rank2Types #-}
+
+We need the Derive Generic extention to derive the Generic representation
+used for the non spliced in observe (see the Cache data type).
+
+> {-# LANGUAGE DeriveGeneric #-}
+
 > import Debug.Hoed.Observe
 
 We use the Stern–Brocot tree as example. The Stern-Brocot tree is a
@@ -16,15 +22,20 @@ our definition is endless we do not actually use Leaf.
 
 The values in the tree will be fractional numbers:
 
-> data Frac = Frac Int Int deriving Show
+> data Frac = Frac Int Int deriving (Show,Generic)
 
 We use cache to store what the last seen up and to the left, and up and
 to the right values are.
 
-> data Cache a = Cache { v :: a
->                      , l :: a
->                      , r :: a
->                      }
+> data Cache = Cache { v :: Frac
+>                    , l :: Frac
+>                    , r :: Frac
+>                    } deriving Generic
+
+Make Cache and Frac Observable for gdmobserve.
+
+> instance Observable Cache
+> instance Observable Frac
 
 The mediant is used to find which new number to insert between 2 exisiting
 numbers.
@@ -40,11 +51,11 @@ Definition of the sternbrocot tree:
 > sternbrocot' :: (Frac -> Frac -> Frac) -> Tree Frac
 > sternbrocot' m = w_sternbrocot m Cache{v=(Frac 1 1), l=(Frac 0 1), r=(Frac 1 0)}
 >
-> w_sternbrocot :: (Frac -> Frac -> Frac) -> (Cache Frac) -> Tree Frac
-> w_sternbrocot m Cache{v=v, l=l, r=r}
->  = Node v
->         (w_sternbrocot m Cache{v=m v l, l=l, r=v})
->         (w_sternbrocot m Cache{v=m v r, l=v, r=r})
+> w_sternbrocot :: (Frac -> Frac -> Frac) -> Cache -> Tree Frac
+> w_sternbrocot m cache
+>  = let Cache{v=v, l=l, r=r} = gdmobserve "cache" cache
+>    in  Node v (w_sternbrocot m Cache{v=m v l, l=l, r=v})
+>               (w_sternbrocot m Cache{v=m v r, l=v, r=r})
 
 The Stern-Brocot tree is sorted: all values in the left subtree are
 smaller than the value of the current node and all values in the right subtree
