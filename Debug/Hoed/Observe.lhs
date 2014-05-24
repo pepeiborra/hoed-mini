@@ -253,7 +253,9 @@ instance (GObservable a, Constructor c) => GObservable (M1 C c a) where
 --      | selName m == "" = M1 y
 --      | otherwise       = M1 (send (selName m) (return y) cxt)
 instance (GObservable a, Selector s) => GObservable (M1 S s a) where
-        gdmobserver m@(M1 x) cxt = M1 (gdmobserver x cxt)
+        gdmobserver m@(M1 x) cxt
+          | selName m == "" = M1 (gdmobserver x cxt)
+          | otherwise       = M1 (send (selName m ++ " =") (gdmObserveChildren x) cxt)
         gdmObserveChildren = gthunk
 
 -- Unit: used for constructors without arguments
