@@ -1,5 +1,5 @@
 name:                Hoed
-version:             0.1.0.1
+version:             0.2
 synopsis:            Debug anything without recompiling everything!
 description:         Lightweight debugging based on the observing of intermediate values. How values are observed can be derived with the Generic Deriving Mechanism, or generated with Template Haskell.
 homepage:            http://maartenfaddegon.nl/pub
