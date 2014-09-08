@@ -6,8 +6,9 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE OverlappingInstances #-}
+{-# LANGUAGE IncoherentInstances #-}
 {-# LANGUAGE KindSignatures #-}
-
 \end{code}
 
 The file is part of the Haskell Object Observation Debugger,
@@ -54,6 +55,7 @@ module Debug.Hoed.Observe
   -- , Observing      -- a -> a
   , Observable(..) -- Class
   , Observable1(..)  -- Higher order version of Observable
+  , Parent
   , nilObserver
   , runO	   -- IO a -> IO ()
   , printO	   -- a -> IO ()
@@ -75,8 +77,8 @@ module Debug.Hoed.Observe
   , debugO	   -- IO a -> IO [CDS]
   , CDS(..)
 
-  , Generic
-  ) where	
+  , Generic, Generic1
+  ) where
 \end{code}
 
 
@@ -118,10 +120,13 @@ import qualified Control.Exception as Exception
 		) as Exception
 -}
 import Data.Dynamic ( Dynamic )
+
+import Prelude.Extras (Lift1(..))
 \end{code}
 
 \begin{code}
 infixl 9 <<
+infixl 9 .<<
 \end{code}
 
 
@@ -220,10 +225,10 @@ he generic implementation of the observer function.
 
 \begin{code}
 class Observable a where
-	observer  :: a -> Parent -> a 
+	observer  :: a -> Parent -> a
         default observer :: (Generic a, GObservable (Rep a)) => a -> Parent -> a
         observer x c = to (gdmobserver (from x) c)
-	{- 
+	{-
          - This used used to group several observer instances together.
 	 -}
 	observers :: Parent -> String -> (Observer -> a) -> a
@@ -234,26 +239,26 @@ class Observable1 f where
 --        default observer1 :: (Observable (f a), Observable a) => f a -> Parent -> f a
 --        observer1 = observer
 
-        default observer1 :: (Generic (f a), GObservable (Rep (f a))) => f a -> Parent -> f a
-        observer1 x c = to (gdmobserver (from x) c)
+        default observer1 :: (Generic1 f, Observable a, GObservable1 (Rep1 f)) => f a -> Parent -> f a
+        observer1 x c = to1 (gdmobserver1 (from1 x) c)
 
         observers1 :: Observable a => Parent -> String -> (Observer -> f a) -> f a
         observers1 = defaultObservers1
-
+{-
 instance (Observable1 f, Observable a) => Observable (f a) where
   observer = observer1
   observers = observers1
-
-nilObserver :: Observer
-nilObserver = O o oo where
-  o  _ x = x
-  oo _ f = f nilObserver
-
+-}
 
 class GObservable f where
         gdmobserver :: f a -> Parent -> f a
         gdmObserveChildren :: f a -> ObserverM (f a)
         gdmShallowShow :: f a -> String
+
+class GObservable1 f where
+  gdmobserver1 :: Observable a => f a -> Parent -> f a
+  gdmObserveChildren1 :: Observable a => f a -> ObserverM (f a)
+  gdmShallowShow1 :: Observable a => f a -> String
 
 \end{code}
 
@@ -273,16 +278,24 @@ Observing the children of Data types of kind *.
 -- Meta: data types
 
 instance GObservable (V1) where
-  
+instance GObservable1 V1
+
 instance (GObservable a) => GObservable (M1 D d a) where
         gdmobserver m@(M1 x) cxt = M1 (gdmobserver x cxt)
         gdmObserveChildren = gthunk
+instance (GObservable1 a) => GObservable1 (M1 D d a) where
+        gdmobserver1 m@(M1 x) cxt = M1 (gdmobserver1 x cxt)
+        gdmObserveChildren1 = gthunk1
 
 -- Meta: Constructors
 instance (GObservable a, Constructor c) => GObservable (M1 C c a) where
         gdmobserver m@(M1 x) cxt = M1 (send (gdmShallowShow m) (gdmObserveChildren x) cxt)
         gdmObserveChildren = gthunk
         gdmShallowShow = conName
+instance (GObservable1 a, Constructor c) => GObservable1 (M1 C c a) where
+        gdmobserver1 m@(M1 x) cxt = M1 (send (gdmShallowShow1 m) (gdmObserveChildren1 x) cxt)
+        gdmObserveChildren1 = gthunk1
+        gdmShallowShow1 = conName
 
 -- Meta: Selectors
 --      | selName m == "" = M1 y
@@ -292,35 +305,75 @@ instance (GObservable a, Selector s) => GObservable (M1 S s a) where
           | selName m == "" = M1 (gdmobserver x cxt)
           | otherwise       = M1 (send (selName m ++ " =") (gdmObserveChildren x) cxt)
         gdmObserveChildren = gthunk
+instance (GObservable1 a, Selector s) => GObservable1 (M1 S s a) where
+        gdmobserver1 m@(M1 x) cxt
+          | selName m == "" = M1 (gdmobserver1 x cxt)
+          | otherwise       = M1 (send (selName m ++ " =") (gdmObserveChildren1 x) cxt)
+        gdmObserveChildren1 = gthunk1
 
 -- Unit: used for constructors without arguments
 instance GObservable U1 where
         gdmobserver x _ = x
-
         gdmObserveChildren = return
+instance GObservable1 U1 where
+        gdmobserver1 x _ = x
+        gdmObserveChildren1 = return
 
 -- Products: encode multiple arguments to constructors
 instance (GObservable a, GObservable b) => GObservable (a :*: b) where
         gdmobserver (a :*: b) cxt = error "gdmobserver product"
-
         gdmObserveChildren (a :*: b) = do a'  <- gdmObserveChildren a
                                           b'  <- gdmObserveChildren b
                                           return (a' :*: b')
+instance (GObservable1 a, GObservable1 b) => GObservable1 (a :*: b) where
+        gdmobserver1 (a :*: b) cxt = error "gdmobserver product"
+        gdmObserveChildren1 (a :*: b) = do a'  <- gdmObserveChildren1 a
+                                           b'  <- gdmObserveChildren1 b
+                                           return (a' :*: b')
 
 
 -- Sums: encode choice between constructors
 instance (GObservable a, GObservable b) => GObservable (a :+: b) where
         gdmobserver (L1 x) cxt = L1 (gdmobserver x cxt)
         gdmobserver (R1 x) cxt = R1 (gdmobserver x cxt)
-
         gdmObserveChildren (R1 x) = do {x' <- gdmObserveChildren x; return (R1 x')}
         gdmObserveChildren (L1 x) = do {x' <- gdmObserveChildren x; return (L1 x')}
+instance (GObservable1 a, GObservable1 b) => GObservable1 (a :+: b) where
+        gdmobserver1 (L1 x) cxt = L1 (gdmobserver1 x cxt)
+        gdmobserver1 (R1 x) cxt = R1 (gdmobserver1 x cxt)
+        gdmObserveChildren1 (R1 x) = do {x' <- gdmObserveChildren1 x; return (R1 x')}
+        gdmObserveChildren1 (L1 x) = do {x' <- gdmObserveChildren1 x; return (L1 x')}
 
 -- Constants: additional parameters and recursion of kind *
 instance (Observable a) => GObservable (K1 i a) where
         gdmobserver (K1 x) cxt = K1 (observer_ observer x cxt)
-
         gdmObserveChildren = gthunk
+instance (Observable a) => GObservable1 (K1 i a) where
+        gdmobserver1 (K1 x) cxt = K1 (observer_ observer x cxt)
+        gdmObserveChildren1 = gthunk1
+
+-- Recursion
+instance (Observable1 f) => GObservable1 (Rec1 f) where
+        gdmobserver1 (Rec1 x) ctxt = Rec1 (observer1 x ctxt)
+        gdmObserveChildren1 = gthunk1
+-- Ocurrence
+instance GObservable1 Par1 where
+        gdmobserver1 (Par1 x) ctxt = Par1 (observer x ctxt)
+        gdmObserveChildren1 = gthunk1
+
+-- Composition
+instance (Functor f, Observable1 f, GObservable1 g) => GObservable1 (f :.: g) where
+        gdmobserver1 (Comp1 fg) ctxt =
+          Comp1 (fmap glower1 $ observer1 (fmap GLift1 fg) ctxt)
+
+newtype GLift1 f a = GLift1 { glower1 :: f a }
+
+instance GObservable1 f => Observable1 (GLift1 f) where
+  observer1 (GLift1 fx) = GLift1 . gdmobserver1 fx
+
+instance (Observable a, GObservable1 f) => Observable (GLift1 f a) where
+  observer = observer1
+
 \end{code}
 
 Observing functions is done via the ad-hoc mechanism, because
@@ -331,6 +384,32 @@ this type.
 instance (Observable a) => Observable1 ((->) a) where
   observer1 fn cxt arg = gdmFunObserver cxt fn arg
   observers1 = defaultFnObservers
+
+instance (Observable a, Observable b) => Observable(a -> b) where
+  observer = observer1
+  observers = observers1
+
+instance (Observable1 f, Observable a) => Observable1((->) (f a)) where
+  observer1 fn ctxt arg
+         = sendObserveFnPacket (do { arg' <- thunk observer1 arg
+                                  ; thunk observer (fn arg')
+                                  }
+                              ) ctxt
+  observers1 = defaultFnObservers
+
+instance (Observable1 f, Observable a, Observable b) => Observable(f a -> b) where
+  observer = observer1
+  observers = observers1
+
+instance (Observable1 f, Observable a, Observable1 g, Observable b) => Observable(f a -> g b) where
+  observer fn ctxt arg
+         = sendObserveFnPacket (do { arg' <- thunk observer1 arg
+                                  ; thunk observer1 (fn arg')
+                                  }
+                              ) ctxt
+  observers = defaultFnObservers1
+
+--  observers = observers1
 
 \end{code}
 
@@ -825,37 +904,78 @@ The Constructors.
 instance (Observable a) => Observable1 ((,) a) where
   observer1 (a,b) = send "," (return (,) << a << b)
 
+instance (Observable a, Observable b) => Observable (a,b) where
+  observer = observer1
+  observers = observers1
+
 instance (Observable a,Observable b) => Observable1 ((,,) a b) where
   observer1 (a,b,c) = send "," (return (,,) << a << b << c)
+
+instance (Observable a, Observable b, Observable c) => Observable (a,b,c) where
+  observer = observer1
+  observers = observers1
 
 instance (Observable a,Observable b,Observable c) 
 	  => Observable1 ((,,,) a b c) where
   observer1 (a,b,c,d) = send "," (return (,,,) << a << b << c << d)
 
+instance (Observable a, Observable b, Observable c, Observable d) => Observable (a,b,c,d) where
+  observer = observer1
+  observers = observers1
+
 instance (Observable a,Observable b,Observable c,Observable d) 
 	 => Observable1 ((,,,,) a b c d) where
   observer1 (a,b,c,d,e) = send "," (return (,,,,) << a << b << c << d << e)
+
+instance (Observable a, Observable b, Observable c, Observable d, Observable e) => Observable (a,b,c,d,e) where
+  observer = observer1
+  observers = observers1
 
 instance Observable1 [] where
   observer1 (a:as) = send ":"  (return (:) << a .<< as)
   observer1 []     = send "[]" (return [])
 
+instance Observable a => Observable [a] where
+  observer = observer1
+  observers = observers1
+
 instance Observable1 Maybe where
   observer1 (Just a) = send "Just"    (return Just << a)
   observer1 Nothing  = send "Nothing" (return Nothing)
 
+instance Observable a => Observable (Maybe a) where
+  observer = observer1
+  observers = observers1
+
 instance (Observable a) => Observable1 (Either a) where
   observer1 (Left a)  = send "Left"  (return Left  << a)
   observer1 (Right a) = send "Right" (return Right << a)
+
+instance (Observable a, Observable b) => Observable (Either a b) where
+  observer = observer1
+  observers = observers1
+
+instance Observable1 f => Observable1 (Lift1 f) where
+  observer1 (Lift1 f) = Lift1 . observer1 f
+  observers1 p tag f = Lift1 $ observers1 p tag (lower1 . f)
+
+instance (Observable a, Observable1 f) => Observable (Lift1 f a) where
+  observer = observer1
+  observers = observers1
+
 \end{code}
 
 Arrays.
 
 \begin{code}
 instance (Ix a,Observable a) => Observable1 (Array.Array a) where
-  observer1 arr = send "array" (return Array.array .<< Array.bounds arr
-                                                   .<< Array.assocs arr
+  observer1 arr = send "array" (return (\bounds assocs -> Array.array bounds (map lower1 assocs))
+                                        .<< Array.bounds arr
+                                        .<< fmap Lift1(Array.assocs arr)
 			      )
+instance (Ix i, Observable i, Observable a) => Observable (Array.Array i a) where
+  observer = observer1
+  observers = observers1
 \end{code}
 
 IO monad.
@@ -865,6 +985,9 @@ instance Observable1 IO where
   observer1 fn cxt =
 	do res <- fn
 	   send "<IO>" (return return << res) cxt
+instance Observable a => Observable (IO a) where
+  observers = observers1
+  observer = observer1
 \end{code}
 
 Higuer-Order Observables
@@ -925,6 +1048,10 @@ data Observer =
   O (forall a. Observable a => String -> a -> a)
     (forall a. Observable a => String -> (Observer -> a) -> a)
 
+nilObserver :: Observer
+nilObserver = O o oo where
+  o  _ x = x
+  oo _ f = f nilObserver
 
 defaultObservers :: (Observable a) => Parent -> String -> (Observer -> a) -> a
 defaultObservers parent label fn = unsafeWithUniq $ \node -> do
@@ -936,11 +1063,18 @@ defaultObservers1 :: (Observable1 f, Observable a) => Parent -> String -> (Obser
 defaultObservers1 parent label fn = unsafeWithUniq $ \node -> do
         sendEvent node parent (Observe label)
         let p = Parent node 0
-        return$ observer_ observer (fn (O (gobserve p) (observers p))) p
+        return$ observer_ observer1 (fn (O (gobserve p) (observers p))) p
 
 defaultFnObservers :: (Observable1 ((->) a), Observable b)
 		      => Parent -> String -> (Observer -> a -> b) -> a -> b
 defaultFnObservers parent label fn arg = unsafeWithUniq $ \node -> do
+        sendEvent node parent (Observe label)
+        let p = Parent node 0
+        return$ observer_ observer1 (fn (O (gobserve p) (observers p))) p arg
+
+defaultFnObservers1 :: (Observable1 ((->) (f a)), Observable1 f, Observable1 g, Observable a, Observable b)
+		      => Parent -> String -> (Observer -> f a -> g b) -> f a -> g b
+defaultFnObservers1 parent label fn arg = unsafeWithUniq $ \node -> do
         sendEvent node parent (Observe label)
         let p = Parent node 0
         return$ observer_ observer (fn (O (gobserve p) (observers p))) p arg
@@ -978,6 +1112,14 @@ thunk f a = ObserverM $ \ parent port ->
 gthunk :: (GObservable f) => f a -> ObserverM (f a)
 gthunk a = ObserverM $ \ parent port ->
 		( gdmobserver_ a (Parent
+				{ observeParent = parent
+				, observePort   = port
+				}) 
+		, port+1 )
+
+gthunk1 :: (GObservable1 f, Observable a) => f a -> ObserverM (f a)
+gthunk1 a = ObserverM $ \ parent port ->
+		( gdmobserver1_ a (Parent
 				{ observeParent = parent
 				, observePort   = port
 				}) 
@@ -1071,6 +1213,9 @@ observer_ f a context = sendEnterPacket f a context
 gdmobserver_ :: (GObservable f) => f a -> Parent -> f a
 gdmobserver_ a context = gsendEnterPacket a context
 
+gdmobserver1_ :: (GObservable1 f, Observable a) => f a -> Parent -> f a
+gdmobserver1_ a context = gsendEnterPacket1 a context
+
 {-# NOINLINE observer__ #-}
 observer__ :: a -> Parent -> a
 observer__ a context = sendNoEnterPacket a context
@@ -1117,6 +1262,13 @@ gsendEnterPacket :: (GObservable f) => f a -> Parent -> f a
 gsendEnterPacket r context = unsafeWithUniq $ \ node ->
      do	{ sendEvent node context Enter
 	; ourCatchAllIO (evaluate (gdmobserver r context))
+	                (handleExc context)
+	}
+
+gsendEnterPacket1 :: (GObservable1 f, Observable a) => f a -> Parent -> f a
+gsendEnterPacket1 r context = unsafeWithUniq $ \ node ->
+     do	{ sendEvent node context Enter
+	; ourCatchAllIO (evaluate (gdmobserver1 r context))
 	                (handleExc context)
 	}
 
@@ -1279,7 +1431,8 @@ eventsToCDS pairs = getChild 0 0
    where
      res i = (!) out_arr i
 
-     bnds = (0, length pairs)
+     maxBnd = if null pairs then 0 else maximum $ map portId pairs
+     bnds = (0, maxBnd)
 
      mid_arr :: Array Int [(Int,CDS)]
      mid_arr = accumArray (flip (:)) [] bnds
@@ -1359,7 +1512,7 @@ renderFn :: ([CDSSet],CDSSet) -> DOC
 renderFn (args,res) 
 	= grp  (nest 3 
 		(text "\\ " <>
-		 foldr (\ a b -> nest 0 (renderSet' 10 False a) <> sp <> b)
+		 foldr (\ a b -> nest 0 (renderSet' 10 False a) <> sep <> b)
 		       nil
 		       args <> sep <>
 		 text "-> " <> renderSet' 0 False res
@@ -1536,6 +1689,7 @@ layout Nil		= ""
 layout (Text _ s x)	= s ++ layout x
 layout (Line _ i x)	= '\n' : replicate i ' ' ++ layout x
 
+best :: Int -> Int -> DOC -> Doc
 best w k doc = be w k [(0,doc)]
 
 be 			:: Int -> Int -> [(Int,DOC)] -> Doc
