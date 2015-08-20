@@ -1,5 +1,5 @@
-name:                Hoed
-version:             0.2
+name:                hoed-mini
+version:             0.3
 synopsis:            Debug anything without recompiling everything!
 description:         Lightweight debugging based on the observing of intermediate values. How values are observed can be derived with the Generic Deriving Mechanism, or generated with Template Haskell.
 homepage:            http://maartenfaddegon.nl/pub
@@ -12,7 +12,8 @@ category:            Debug, Trace
 build-type:          Simple
 cabal-version:       >=1.10
 homepage:            http://maartenfaddegon.nl/pub
-
+tested-with:         ghc >= 7.10
+                     
 flag buildExamples
     description: Build example executables.
     default:     False
