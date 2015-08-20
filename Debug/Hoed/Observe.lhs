@@ -5,8 +5,6 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE OverlappingInstances #-}
-{-# LANGUAGE IncoherentInstances #-}
 {-# LANGUAGE KindSignatures #-}
 \end{code}
 
@@ -377,15 +375,15 @@ we provide an instance definition the default is ignored for
 this type.
 
 \begin{code}
-instance (Observable a) => Observable1 ((->) a) where
+instance {-# OVERLAPPABLE #-} (Observable a) => Observable1 ((->) a) where
   observer1 fn cxt arg = gdmFunObserver cxt fn arg
   observers1 = defaultFnObservers
 
-instance (Observable a, Observable b) => Observable(a -> b) where
+instance {-# OVERLAPPABLE #-} (Observable a, Observable b) => Observable (a -> b) where
   observer = observer1
   observers = observers1
 
-instance (Observable1 f, Observable a) => Observable1((->) (f a)) where
+instance {-# OVERLAPPABLE #-} (Observable1 f, Observable a) => Observable1((->) (f a)) where
   observer1 fn ctxt arg
          = sendObserveFnPacket (do { arg' <- thunk observer1 arg
                                   ; thunk observer (fn arg')
@@ -393,11 +391,11 @@ instance (Observable1 f, Observable a) => Observable1((->) (f a)) where
                               ) ctxt
   observers1 = defaultFnObservers
 
-instance (Observable1 f, Observable a, Observable b) => Observable(f a -> b) where
+instance {-# OVERLAPPABLE #-} (Observable1 f, Observable a, Observable b) => Observable(f a -> b) where
   observer = observer1
   observers = observers1
 
-instance (Observable1 f, Observable a, Observable1 g, Observable b) => Observable(f a -> g b) where
+instance {-# OVERLAPPABLE #-} (Observable1 f, Observable a, Observable1 g, Observable b) => Observable(f a -> g b) where
   observer fn ctxt arg
          = sendObserveFnPacket (do { arg' <- thunk observer1 arg
                                   ; thunk observer1 (fn arg')
