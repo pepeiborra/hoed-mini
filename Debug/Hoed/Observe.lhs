@@ -1,6 +1,5 @@
 \begin{code}
 {-# LANGUAGE Rank2Types #-}
-{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE DefaultSignatures #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE TypeOperators #-}
@@ -47,8 +46,7 @@ module Debug.Hoed.Observe
   (
    -- * The main Hood API
   
-     observe
-  , gdmobserve
+    gdmobserve
   , gdmobserve1
   , gdmobservers
   , Observer(..)   -- contains a 'forall' typed observe (if supported).
@@ -70,8 +68,6 @@ module Debug.Hoed.Observe
   , observeBase
   , observeOpaque
 
-  , observedTypes
-
   -- * For users that want to write there own render drivers.
   
   , debugO	   -- IO a -> IO [CDS]
@@ -91,13 +87,13 @@ module Debug.Hoed.Observe
 \begin{code}
 import System.IO
 import Data.Maybe
+import Control.Applicative
 import Control.Monad
 import Data.Array as Array
 import Data.List
 import Data.Char
 --import System
 
-import Language.Haskell.TH
 import GHC.Generics
 
 -- The only non standard one we assume
@@ -442,313 +438,6 @@ gdmFunObserver1 cxt fn arg
 Generate a new observe from generated observers and the gobserve mechanism.
 Where gobserve is the 'classic' observe but parametrized.
 
-\begin{code}
-observe :: String -> Q Exp
-observe s = do n  <- methodName s
-               let f  = return $ VarE n
-                   s' = stringE s
-               [| (\x-> gobserve $f $s' x) |]
-\end{code}
-
-Generate class definition and class instances for list of types.
-
-\begin{code}
-observedTypes :: String -> [Q Type] -> Q [Dec]
-observedTypes s qt = do cd <- (genClassDef s)
-                        ci <- foldM f [] qt
-                        bi <- foldM g [] baseTypes
-                        fi <- (gfunObserver s)
-                        li <- (gListObserver s)
-                        return (cd ++ ci ++ bi ++ fi ++ li)
-        where f d t = do ds <- (gobservableInstance s t)
-                         return (ds ++ d)
-              g d t = do ds <- (gobservableBaseInstance s t)
-                         return (ds ++ d)
-              baseTypes = [[t|Int|], [t|Char|], [t|Float|], [t|Bool|]]
-
-
-
-\end{code}
-
-Generate a class definition from a string
-
-\begin{code}
-
-genClassDef :: String -> Q [Dec]
-genClassDef s = do cn <- className s
-                   mn <- methodName s
-                   nn <-  newName "a"
-                   let a   = PlainTV nn
-                       tvb = [a]
-                       vt  = varT nn
-                   mt <- [t| $vt -> Parent -> $vt |]
-                   let m   = SigD mn mt
-                       cd  = ClassD [] cn tvb [] [m]
-                   return [cd]
-
-className :: String -> Q Name
-className s = return $ mkName ("Observable" ++ headToUpper s)
-
-methodName :: String -> Q Name
-methodName s = return $ mkName ("observer" ++ headToUpper s)
-
-headToUpper (c:cs) = toUpper c : cs
-
-\end{code}
-
-\begin{code}
-gobserverBase :: Q Name -> Q Type -> Q [Dec]
-gobserverBase qn t = do n <- qn
-                        c <- gobserverBaseClause qn
-                        return [FunD n [c]]
-
-gobserverBaseClause :: Q Name -> Q Clause
-gobserverBaseClause qn = clause [] (normalB (varE $ mkName "observeBase")) []
-
-gobserverList :: Q Name -> Q [Dec]
-gobserverList qn = do n  <- qn
-                      cs <-listClauses qn
-                      return [FunD n cs]
-
-
-\end{code}
-
-The generic implementation of the observer function, special cases
-for base types and functions.
-
-\begin{code}
-gobserver :: Q Name -> Q Type -> Q [Dec]
-gobserver qn t = do n <- qn
-                    cs <- gobserverClauses qn t
-                    return [FunD n cs]
-
-gobserverClauses :: Q Name -> Q Type -> Q [Clause]
-gobserverClauses n qt = do t  <- qt
-                           bs <- getBindings qt
-                           case t of
-                                _     -> do cs <- (getConstructors . getName) qt
-                                            mapM (gobserverClause t n bs) cs
-
-gobserverClause :: Type -> Q Name -> TyVarMap -> Con -> Q Clause
-gobserverClause t n bs (y@(NormalC name fields))
-  = do { vars <- guniqueVariables (length fields)
-       ; let evars = map varE vars
-             pvars = map varP vars
-             c'    = varP (mkName "c")
-             c     = varE (mkName "c")
-       ; clause [conP name pvars, c']
-           ( normalB [| send $(shallowShow y) $(observeChildren n t bs y evars) $c |]
-           ) []
-       }
-gobserverClause t n bs y = error ("gobserverClause can't handle " ++ show y)
-
-listClauses :: Q Name -> Q [Clause]
-listClauses n = do l1 <- listClause1 n 
-                   l2 <- listClause2 n 
-                   return [l1, l2]
-
--- observer (a:as) = send ":"  (return (:) << a << as)
-listClause1 :: Q Name -> Q Clause
-listClause1 qn
-  = do { n <- qn
-       ; let a'    = varP (mkName "a")
-             a     = varE (mkName "a")
-             as'   = varP (mkName "as")
-             as    = varE (mkName "as") 
-             c'    = varP (mkName "c")
-             c     = varE (mkName "c")
-             t     = [| thunk $(varE n)|] -- MF TODO: or nothunk
-             name  = mkName ":"
-       ; clause [infixP a' name as', c']
-           ( normalB [| send ":" ( compositionM $t
-                                   ( compositionM $t
-                                     ( return (:)
-                                     ) $a
-                                   ) $as
-                                 ) $c
-                     |]
-           ) []
-       }
-
--- observer []     = send "[]" (return [])
-listClause2 :: Q Name -> Q Clause
-listClause2 qn
-  = do { n <- qn
-       ; let c'    = varP (mkName "c")
-             c     = varE (mkName "c")
-       ; clause [wildP, c']
-           ( normalB [| send "[]" (return []) $c |]
-           ) []
-       }
-
-\end{code}
-
-We also need to do some work to also generate the instance declaration
-around the observer method.
-
-\begin{code}
-gobservableInstance :: String -> Q Type -> Q [Dec]
-gobservableInstance s qt 
-  = do t  <- qt
-       cn <- className s
-       let ct = conT cn
-       n  <- case t of
-            (ForallT tvs _ t') -> [t| $ct $(return t') |]
-            _                  -> [t| $ct $qt          |]
-       m  <- gobserver (methodName s) qt
-       c  <- case t of 
-                (ForallT _ c' _)   -> return c'
-                _                  -> return []
-       return [InstanceD (updateContext cn c) n m]
-
-updateContext :: Name -> [Pred] -> [Pred]
-updateContext cn ps = map f ps
-        where f (ClassP n ts)
-                | nameBase n == "Observable" = ClassP cn ts
-                | otherwise                  = ClassP  n ts
-              f p = p
-
-gobservableBaseInstance :: String -> Q Type -> Q [Dec]
-gobservableBaseInstance s qt
-  = do t  <- qt
-       cn <- className s
-       let ct = conT cn
-       n  <- case t of
-            (ForallT tvs _ t') -> [t| $ct $(return t') |]
-            _                  -> [t| $ct $qt          |]
-       m  <- gobserverBase (methodName s) qt
-       c  <- case t of 
-                (ForallT _ c' _)   -> return c'
-                _                  -> return []
-       return [InstanceD c n m]
-
-gobservableListInstance :: String -> Q [Dec]
-gobservableListInstance s
-  = do let qt = [t|forall a . [] a |]
-       t  <- qt
-       cn <- className s
-       let ct = conT cn
-       n  <- case t of
-            (ForallT tvs _ t') -> [t| $ct $(return t') |]
-            _                  -> [t| $ct $qt          |]
-       m  <- gobserverList (methodName s)
-       c  <- case t of 
-                (ForallT _ c' _)   -> return c'
-                _                  -> return []
-       return [InstanceD c n m]
-
-gListObserver :: String -> Q [Dec]
-gListObserver s
-  = do cn <- className s
-       let ct = conT cn
-           a  = VarT (mkName "a")
-           a' = return a
-       p <- classP cn [a']
-       c <- return [p]
-       n <- [t| $ct [$a'] |]
-       m <- gobserverList (methodName s)
-       return [InstanceD c n m]
-
-
-gobserverFunClause :: Name -> Q Clause
-gobserverFunClause n
-  = do { [f',a'] <- guniqueVariables 2
-       ; let vs        = [f', mkName "c", a']
-             [f, c, a] = map varE vs
-             pvars     = map varP vs
-       ; clause pvars 
-         (normalB [| sendObserveFnPacket ( do a' <- thunk $(varE n) $a
-                                              thunk $(varE n) ($f a')
-                                         ) $c
-                  |]
-         ) []
-       }
-
-gobserverFun :: Q Name -> Q [Dec]
-gobserverFun qn
-  = do n  <- qn
-       c  <- gobserverFunClause n
-       cs <- return [c]
-       return [FunD n cs]
-
-gfunObserver :: String -> Q [Dec]
-gfunObserver s
-  = do cn <- className s
-       let ct = conT cn
-           a  = VarT (mkName "a")
-           b  = VarT (mkName "b")
-           f  = return $ AppT (AppT ArrowT a) b
-           a' = return a
-           b' = return b
-       pa <- classP cn [a']
-       pb <- classP cn [b']
-       c <- return [pa,pb]
-       n <- [t| $ct $f |]
-       m <- gobserverFun (methodName s)
-       return [InstanceD c n m]
-
-\end{code}
-
-Creating a shallow representation for types of the Data class.
-
-\begin{code}
-shallowShow :: Con -> ExpQ
-shallowShow (NormalC name _) = stringE (nameBase name)
-\end{code}
-
-Observing the children of Data types of kind *.
-
-Note how we are forced to add the extra 'vars' argument that should
-have the same unique name as the corresponding pattern.
-
-To implement observeChildren we also define a mapM and compositionM function.
-To our knowledge there is no existing work that do this in a generic fashion
-with Template Haskell.
-
-\begin{code}
-
-isObservable :: TyVarMap -> Type -> Type -> Q Bool
-isObservable bs s t = if s == t then return True else isObservable' bs t
-isObservable' bs (VarT n)      = case lookupBinding bs n of
-                                      (Just (T t)) -> isObservableT t
-                                      (Just (P p)) -> isObservableP p
-                                      Nothing      -> return False
-isObservable' bs (AppT t _)    = isObservable' bs t
-isObservable' (n,_) t@(ConT m) = if n == m then return True else isObservableT t
-isObservable' bs t             = isObservableT t
-
-isObservableT :: Type -> Q Bool
-isObservableT t@(ConT _)                 = isInstance (mkName "Observable") [t]
-isObservableT _                          = return False 
-
-isObservableP :: Pred -> Q Bool
-isObservableP (ClassP n _) = return $ (nameBase n) == "Observable"
-isObservableP _            = return False
-
-
-thunkObservable :: Q Name -> TyVarMap -> Type -> Type -> Q Exp
-thunkObservable qn bs s t
-  = do i <- isObservable bs s t
-       n <- qn
-       if i then [| thunk $(varE n) |] else [| nothunk |]
-
-observeChildren :: Q Name -> Type -> TyVarMap -> Con -> [Q Exp] -> Q Exp
-observeChildren n t bs = gmapM (thunkObservable n bs t)
-
-gmapM :: (Type -> Q Exp) -> Con -> [ExpQ] -> ExpQ
-gmapM f (NormalC name fields) vars
-  = m name (reverse fields) (reverse vars) 
-  where m :: Name -> [(Strict,Type)] -> [ExpQ] -> ExpQ
-        m n _      []           = [| return $(conE n)                      |]
-        m n ((_,t):ts) (v:vars) = [| compositionM $(f t) $(m n ts vars) $v |]
-
-
-compositionM :: Monad m => (a -> m b) -> m (b -> c) -> a -> m c
-compositionM f g x = do { g' <- g 
-                        ; x' <- f x 
-                        ; return (g' x') 
-                        }
-\end{code}
 
 Observing functions is done via the ad-hoc mechanism, because
 we provide an instance definition the default is ignored for
@@ -760,114 +449,6 @@ this type.
 --   observer = funObserver
 \end{code}
 
-And we need some helper functions:
-
-\begin{code}
-
--- A mapping from typevars to the type they are bound to.
-
-type TyVarMap = (Name, [(TyVarBndr,TypeOrPred)])
-
-data TypeOrPred = T Type | P Pred
-
-
--- MF TODO lookupBinding
-
-lookupBinding :: TyVarMap -> Name -> Maybe TypeOrPred
-lookupBinding (_,[]) _ = Nothing
-lookupBinding (r,((b,t):ts)) n
-  = let m = case b of (PlainTV  m  ) -> m
-                      (KindedTV m _) ->m
-    in if (m == n) then Just t else lookupBinding (r,ts) n
-
--- Given a parametrized type, get a list with typevars and their bindings
--- e.g. [(a,Int), (b,Float)] in (MyData a b) Int Float
-
-getBindings :: Q Type -> Q TyVarMap
-getBindings t = do bs  <- getBs t
-                   tvs <- (getTvbs . getName) t
-                   pbs <- getPBindings t
-                   n   <- getName t
-                   let fromApps = (zip tvs (map T bs))
-                       fromCxt  = (zip tvs (map P pbs)) 
-                   return (n, (fromCxt ++ fromApps))
-
-getPBindings :: Q Type -> Q [Pred]
-getPBindings qt = do t <- qt 
-                     case t of (ForallT _ cs _) -> getPBindings' cs
-                               _                -> return []
-
-getPBindings' :: [Pred] -> Q [Pred]
-getPBindings' []     = return []
-getPBindings' (p:ps) = do pbs <- getPBindings' ps
-                          return $ case p of (ClassP n t) -> p : pbs
-                                             _            -> pbs
-
--- Given a parametrized type, get a list with its type variables
--- e.g. [a,b] in (MyData a b) Int Float
-
-getTvbs :: Q Name -> Q [TyVarBndr]
-getTvbs name = do {n <- name; TyConI (DataD _ _ tvbs _ _)  <- reify n; return tvbs}
-
--- Given a parametrized type, get a list with the bindings of type variables
--- e.g. [Int,Float] in (MyData a b) Int Float
-
-getBs :: Q Type -> Q [Type]
-getBs t = do t' <- t
-             let t'' = case t' of (ForallT _ _ s) -> s
-                                  _               -> t'
-             return (getBs' t'')
-
-getBs' :: Type -> [Type]
-getBs' (AppT c t) = t : getBs' c
-getBs' _          = []
-
--- Given a parametrized type, get the name of the type constructor (e.g. Tree in Tree Int)
-
-getName :: Q Type -> Q Name
-getName t = do t' <- t
-               getName' t'
-
-getName' :: Type -> Q Name
-getName' t = case t of 
-      		(ForallT _ _ t'') -> getName' t''
-                (AppT t'' _)      -> getName' t''
-      		(ConT name)       -> return name
-
--- Given a type, get a list of type variables.
-
-getTvs :: Q Type -> Q [TyVarBndr]
-getTvs t = do {(ForallT tvs _ _) <- t; return tvs }
-
--- Given a type, get a list of constructors.
-
-getConstructors :: Q Name -> Q [Con]
-getConstructors name = do {n <- name; TyConI (DataD _ _ _ cs _)  <- reify n; return cs}
-
-guniqueVariables :: Int -> Q [Name]
-guniqueVariables n = replicateM n (newName "x")
-
-observableCxt :: [TyVarBndr] -> Q Cxt
-observableCxt tvs = return [classpObservable $ map (\v -> (tvname v)) tvs]
-
-classpObservable :: [Type] -> Pred
-classpObservable = ClassP (mkName "Observable")
-
-qcontObservable :: Q Type
-qcontObservable = return contObservable
-
-contObservable :: Type
-contObservable = ConT (mkName "Observable")
-
-qtvname :: TyVarBndr -> Q Type
-qtvname = return . tvname
-
-tvname :: TyVarBndr -> Type
-tvname (PlainTV  name  ) = VarT name
-tvname (KindedTV name _) = VarT name
-
-\end{code}
-
 %************************************************************************
 %*									*
 \subsection{Instances}
@@ -1093,6 +674,13 @@ for placing numbers on sub-observations.
 
 \begin{code}
 newtype ObserverM a = ObserverM { runMO :: Int -> Int -> (a,Int) }
+
+instance Functor ObserverM where
+  fmap = liftM
+
+instance Applicative ObserverM where
+  pure  = return
+  (<*>) = ap
 
 instance Monad ObserverM where
 	return a = ObserverM (\ c i -> (a,i))
