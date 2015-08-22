@@ -383,21 +383,9 @@ instance {-# OVERLAPPABLE #-} (Observable a, Observable b) => Observable (a -> b
   observer = observer1
   observers = observers1
 
-instance {-# OVERLAPPABLE #-} (Observable1 f, Observable a) => Observable1((->) (f a)) where
-  observer1 fn ctxt arg
-         = sendObserveFnPacket (do { arg' <- thunk observer1 arg
-                                  ; thunk observer (fn arg')
-                                  }
-                              ) ctxt
-  observers1 = defaultFnObservers
-
-instance {-# OVERLAPPABLE #-} (Observable1 f, Observable a, Observable b) => Observable(f a -> b) where
-  observer = observer1
-  observers = observers1
-
-instance {-# OVERLAPPABLE #-} (Observable1 f, Observable a, Observable1 g, Observable b) => Observable(f a -> g b) where
+instance {-# OVERLAPPABLE #-} (Observable a, Observable1 m, Observable b) => Observable(a -> m b) where
   observer fn ctxt arg
-         = sendObserveFnPacket (do { arg' <- thunk observer1 arg
+         = sendObserveFnPacket (do { arg' <- thunk observer arg
                                   ; thunk observer1 (fn arg')
                                   }
                               ) ctxt
@@ -651,8 +639,8 @@ defaultFnObservers parent label fn arg = unsafeWithUniq $ \node -> do
         let p = Parent node 0
         return$ observer_ observer1 (fn (O (gobserve p) (observers p))) p arg
 
-defaultFnObservers1 :: (Observable1 ((->) (f a)), Observable1 f, Observable1 g, Observable a, Observable b)
-		      => Parent -> String -> (Observer -> f a -> g b) -> f a -> g b
+defaultFnObservers1 :: (Observable1 ((->) a), Observable1 g, Observable a, Observable b)
+		      => Parent -> String -> (Observer -> a -> g b) -> a -> g b
 defaultFnObservers1 parent label fn arg = unsafeWithUniq $ \node -> do
         sendEvent node parent (Observe label)
         let p = Parent node 0
