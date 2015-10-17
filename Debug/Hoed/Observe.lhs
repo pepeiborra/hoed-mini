@@ -672,40 +672,48 @@ instance Monad ObserverM where
 	return a = ObserverM (\ c i -> (a,i))
 	fn >>= k = ObserverM (\ c i ->
 		case runMO fn c i of
-		  (r,i2) -> runMO (k r) c i2
+		  (r,i2) -> i2 `seq` runMO (k r) c i2
 		)
 
 thunk :: (a -> Parent -> a) -> a -> ObserverM a
 thunk f a = ObserverM $ \ parent port ->
+                let port1 = port+1 in
+                port1 `seq`
 		( observer_ f a (Parent
 				{ observeParent = parent
 				, observePort   = port
 				}) 
-		, port+1 )
+		, port1 )
 
 gthunk :: (GObservable f) => f a -> ObserverM (f a)
 gthunk a = ObserverM $ \ parent port ->
+                let port1 = port+1 in
+                port1 `seq`
 		( gdmobserver_ a (Parent
 				{ observeParent = parent
 				, observePort   = port
-				}) 
-		, port+1 )
+				})
+		, port1 )
 
 gthunk1 :: (GObservable1 f, Observable a) => f a -> ObserverM (f a)
 gthunk1 a = ObserverM $ \ parent port ->
+                let port1 = port+1 in
+                port1 `seq`
 		( gdmobserver1_ a (Parent
 				{ observeParent = parent
 				, observePort   = port
-				}) 
-		, port+1 )
+				})
+		, port1 )
 
 nothunk :: a -> ObserverM a
 nothunk a = ObserverM $ \ parent port ->
+                let port1 = port+1 in
+                port1 `seq`
 		( observer__ a (Parent
 				{ observeParent = parent
 				, observePort   = port
-				}) 
-		, port+1 )
+				})
+		, port1 )
 
 
 (<<) :: (Observable a) => ObserverM (a -> b) -> a -> ObserverM b
